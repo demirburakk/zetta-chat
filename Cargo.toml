@@ -1,0 +1,27 @@
+[package]
+name = "zetta-chat"
+description = "A terminal-based chat client & server demonstrating the zetta-transport protocol."
+repository = "https://github.com/demirburakk/zetta-chat"
+version = "0.1.0"
+edition = "2021"
+authors = ["Burak Demir <demirburak8338@gmail.com>"]
+
+[dependencies]
+# ZettaTransport Bağımlılığı (Kendi kütüphaneniz)
+zetta-transport = { git = "https://github.com/demirburakk/zetta-transport.git" }
+
+# TUI ve Terminal
+ratatui = "0.26"
+crossterm = "0.27"
+
+# Asenkron Çalışma Zamanı
+tokio = { version = "1.37", features = ["full"] }
+
+# Loglama (Profesyonel İngilizce loglar için)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# Veri yapıları
+bytes = "1.5"
+unicode-width = "0.2.2"
