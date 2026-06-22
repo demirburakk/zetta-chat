@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration}; // Zamanlayıcıyı ekledik
 use tracing::{error, info, warn};
@@ -19,6 +20,7 @@ pub enum NetEvent {
 
 pub async fn run_network_task(
     server_addr_str: &str,
+    cc_algo: zetta_transport::transport::CongestionControlAlgorithm,
     mut ui_rx: mpsc::Receiver<UiCommand>,
     net_tx: mpsc::Sender<NetEvent>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -28,7 +30,7 @@ pub async fn run_network_task(
     loop {
         let _ = net_tx.send(NetEvent::StatusChanged("Binding local endpoint...".into())).await;
 
-        let client = match ZtEndpoint::bind("0.0.0.0:0", None).await {
+        let client = match ZtEndpoint::bind_with_config("0.0.0.0:0", None, cc_algo).await {
             Ok(ep) => ep,
             Err(e) => {
                 let msg = format!("Bind failed: {:?}", e);
@@ -70,21 +72,28 @@ pub async fn run_network_task(
         // KEEP-ALIVE ZAMANLAYICISI: Her 15 saniyede bir tetiklenecek
         let mut keepalive_interval = interval(Duration::from_secs(15));
         let mut quit_received = false;
+        let mut buf = [0u8; 4096];
 
         loop {
             tokio::select! {
-                incoming = stream.recv() => {
+                incoming = stream.read(&mut buf) => {
                     match incoming {
-                        Some(bytes) => {
-                            if !bytes.is_empty() && bytes.as_ref() != b"\0" {
-                                let text = String::from_utf8_lossy(&bytes).to_string();
+                        Ok(n) => {
+                            if n == 0 {
+                                warn!("Stream closed by the remote server. Reconnecting...");
+                                let _ = net_tx.send(NetEvent::StatusChanged("Disconnected (Stream closed). Reconnecting...".into())).await;
+                                break; // İç döngüden çık, dış döngü tekrar bağlanacak
+                            }
+                            let bytes = &buf[..n];
+                            if bytes != b"\0" {
+                                let text = String::from_utf8_lossy(bytes).to_string();
                                 let _ = net_tx.send(NetEvent::MessageReceived(text)).await;
                             }
                         }
-                        None => {
-                            warn!("Stream closed by the remote server. Reconnecting...");
-                            let _ = net_tx.send(NetEvent::StatusChanged("Disconnected (Stream closed). Reconnecting...".into())).await;
-                            break; // İç döngüden çık, dış döngü tekrar bağlanacak
+                        Err(e) => {
+                            warn!("Stream read error: {:?}. Reconnecting...", e);
+                            let _ = net_tx.send(NetEvent::StatusChanged("Disconnected (Read error). Reconnecting...".into())).await;
+                            break;
                         }
                     }
                 }
@@ -92,7 +101,11 @@ pub async fn run_network_task(
                 ui_cmd = ui_rx.recv() => {
                     match ui_cmd {
                         Some(UiCommand::SendMessage(msg)) => {
-                            if let Err(e) = stream.send(msg.as_bytes()).await {
+                            let send_res = async {
+                                stream.write_all(msg.as_bytes()).await?;
+                                stream.flush().await
+                            }.await;
+                            if let Err(e) = send_res {
                                 error!("Failed to send data: {:?}", e);
                                 let _ = net_tx.send(NetEvent::Error(format!("Send failed: {:?}", e))).await;
                             } else {
@@ -101,7 +114,7 @@ pub async fn run_network_task(
                         }
                         Some(UiCommand::Quit) => {
                             info!("Quit command received, closing stream and connection.");
-                            let _ = stream.close().await;
+                            let _ = stream.shutdown().await;
                             let _ = conn.close().await;
                             quit_received = true;
                             break;
@@ -115,7 +128,11 @@ pub async fn run_network_task(
                 
                 // KEEP-ALIVE GÖNDERİMİ: Azure Firewall'u ve Sunucuyu uyanık tutar
                 _ = keepalive_interval.tick() => {
-                    if let Err(e) = stream.send(b"\0").await {
+                    let keepalive_res = async {
+                        stream.write_all(b"\0").await?;
+                        stream.flush().await
+                    }.await;
+                    if let Err(e) = keepalive_res {
                          warn!("Failed to send keep-alive: {:?}. Reconnecting...", e);
                          break; // Bağlantı koptu, yeniden bağlan
                     }

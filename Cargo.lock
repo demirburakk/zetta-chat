@@ -1494,8 +1494,8 @@ dependencies = [
 
 [[package]]
 name = "zetta-transport"
-version = "0.1.19"
-source = "git+https://github.com/demirburakk/zetta-transport.git#263da3d21e52f4739da39253d9c75e8b208590b3"
+version = "0.1.21"
+source = "git+https://github.com/demirburakk/zetta-transport.git#7384da34a052d83616306ef7160c2820bbaaf3e4"
 dependencies = [
  "aes",
  "bytes",

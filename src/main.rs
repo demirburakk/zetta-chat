@@ -41,11 +41,48 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut app = App::new(ui_tx);
 
     // 5. Start Network Task (Azure Server details can be configured here)
-    // Uygulama başlatılırken argüman verilirse onu kullanır, verilmezse varsayılan olarak lokal adresi kullanır
-    let azure_server_addr = std::env::args().nth(1).unwrap_or_else(|| "127.0.0.1:8080".to_string());
+    // Parse command line arguments: server_addr and --cc <algorithm>
+    let args: Vec<String> = std::env::args().collect();
+    let mut server_addr = "127.0.0.1:8080".to_string();
+    let mut cc_algo = zetta_transport::transport::CongestionControlAlgorithm::Cubic;
+
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--cc" && i + 1 < args.len() {
+            match args[i + 1].to_lowercase().as_str() {
+                "reno" => cc_algo = zetta_transport::transport::CongestionControlAlgorithm::Reno,
+                "cubic" => cc_algo = zetta_transport::transport::CongestionControlAlgorithm::Cubic,
+                other => {
+                    // Restore terminal before exiting to prevent terminal corruption
+                    let _ = disable_raw_mode();
+                    let _ = execute!(
+                        terminal.backend_mut(),
+                        LeaveAlternateScreen,
+                        DisableMouseCapture
+                    );
+                    eprintln!("Unknown congestion control algorithm: {}", other);
+                    std::process::exit(1);
+                }
+            }
+            i += 2;
+        } else if args[i].starts_with('-') {
+            // Restore terminal before exiting
+            let _ = disable_raw_mode();
+            let _ = execute!(
+                terminal.backend_mut(),
+                LeaveAlternateScreen,
+                DisableMouseCapture
+            );
+            eprintln!("Unknown option: {}", args[i]);
+            std::process::exit(1);
+        } else {
+            server_addr = args[i].clone();
+            i += 1;
+        }
+    }
     
     tokio::spawn(async move {
-        if let Err(e) = network::run_network_task(&azure_server_addr, net_rx, net_tx).await {
+        if let Err(e) = network::run_network_task(&server_addr, cc_algo, net_rx, net_tx).await {
             error!("Network task terminated with error: {:?}", e);
         }
     });

@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::broadcast;
 use zetta_transport::transport::endpoint::ZtEndpoint;
 
@@ -13,11 +14,35 @@ struct ChatMessage {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    // DÜZELTME: Herkese açık olması için 0.0.0.0 yapıldı
-    let addr = "0.0.0.0:8080";
-    println!("Starting ZettaTransport Chat Server on {}...", addr);
+    // Parse command line arguments: bind_addr and --cc <algorithm>
+    let args: Vec<String> = std::env::args().collect();
+    let mut addr = "0.0.0.0:8080".to_string();
+    let mut cc_algo = zetta_transport::transport::CongestionControlAlgorithm::Cubic;
 
-    let server = ZtEndpoint::bind(addr, None).await?;
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--cc" && i + 1 < args.len() {
+            match args[i + 1].to_lowercase().as_str() {
+                "reno" => cc_algo = zetta_transport::transport::CongestionControlAlgorithm::Reno,
+                "cubic" => cc_algo = zetta_transport::transport::CongestionControlAlgorithm::Cubic,
+                other => {
+                    eprintln!("Unknown congestion control algorithm: {}", other);
+                    std::process::exit(1);
+                }
+            }
+            i += 2;
+        } else if args[i].starts_with('-') {
+            eprintln!("Unknown option: {}", args[i]);
+            std::process::exit(1);
+        } else {
+            addr = args[i].clone();
+            i += 1;
+        }
+    }
+
+    println!("Starting ZettaTransport Chat Server on {} with {:?} Congestion Control...", addr, cc_algo);
+
+    let server = ZtEndpoint::bind_with_config(&addr, None, cc_algo).await?;
 
     let (tx, _rx) = broadcast::channel::<ChatMessage>(100);
     let user_counter = Arc::new(AtomicUsize::new(1));
@@ -41,15 +66,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 });
 
                 tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
                     loop {
                         tokio::select! {
-                            // DÜZELTME 1: Burası stream.recv() olmalı! (Ağdan o anki kullanıcıyı dinler)
-                            result = stream.recv() => {
+                            result = stream.read(&mut buf) => {
                                 match result {
-                                    Some(data) => {
-                                        // DÜZELTME 2: Keep-alive (boş veri) pinglerini chate gönderme
-                                        if !data.is_empty() && data.as_ref() != b"\0"{
-                                            let msg = String::from_utf8_lossy(&data).to_string();
+                                    Ok(0) => {
+                                        println!("User {} disconnected.", my_id);
+                                        let _ = tx_inner.send(ChatMessage {
+                                            sender_id: 0,
+                                            content: format!("User {} left the chat.", my_id),
+                                        });
+                                        break;
+                                    }
+                                    Ok(n) => {
+                                        let data = &buf[..n];
+                                        if data != b"\0" {
+                                            let msg = String::from_utf8_lossy(data).to_string();
                                             println!("User {}: {}", my_id, msg);
                                             
                                             let _ = tx_inner.send(ChatMessage {
@@ -58,8 +91,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             });
                                         }
                                     }
-                                    None => {
-                                        println!("User {} disconnected.", my_id);
+                                    Err(e) => {
+                                        println!("User {} read error: {:?}. Disconnecting.", my_id, e);
                                         let _ = tx_inner.send(ChatMessage {
                                             sender_id: 0,
                                             content: format!("User {} left the chat.", my_id),
@@ -80,7 +113,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 format!("User {}: {}", chat_msg.sender_id, chat_msg.content)
                                             };
                                             
-                                            let _ = stream.send(formatted_msg.as_bytes()).await;
+                                            let send_res = async {
+                                                stream.write_all(formatted_msg.as_bytes()).await?;
+                                                stream.flush().await
+                                            }.await;
+                                            if let Err(e) = send_res {
+                                                println!("Failed to send to user {}: {:?}", my_id, e);
+                                                break;
+                                            }
                                         }
                                     }
                                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
